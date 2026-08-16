@@ -1,0 +1,152 @@
+name: Reusable Node CI
+
+on:
+  workflow_call:
+    outputs:
+      install_mode:
+        description: Dependency install path that completed (npm-ci or npm-install)
+        value: ${{ jobs.node_ci.outputs.install_mode }}
+      build_completed:
+        description: Whether the requested build gate completed successfully
+        value: ${{ jobs.node_ci.outputs.build_completed }}
+      test_completed:
+        description: Whether the requested test gate completed successfully
+        value: ${{ jobs.node_ci.outputs.test_completed }}
+      audit_completed:
+        description: Whether the requested audit gate completed successfully
+        value: ${{ jobs.node_ci.outputs.audit_completed }}
+    inputs:
+      working-directory:
+        description: Repository-relative directory containing package.json
+        required: false
+        type: string
+        default: .
+      node-version:
+        description: Node.js version passed to actions/setup-node
+        required: false
+        type: string
+        default: "22"
+      run-build:
+        description: Require the package.json build script to pass
+        required: false
+        type: boolean
+        default: true
+      run-tests:
+        description: Require the package.json test script to pass
+        required: false
+        type: boolean
+        default: true
+      run-audit:
+        description: Require the production dependency audit to pass
+        required: false
+        type: boolean
+        default: true
+      audit-level:
+        description: Minimum npm audit severity that fails the job
+        required: false
+        type: string
+        default: high
+
+permissions:
+  contents: read
+
+jobs:
+  node_ci:
+    name: Node ${{ inputs['node-version'] }}
+    runs-on: ubuntu-latest
+    outputs:
+      install_mode: ${{ steps.install.outputs.mode }}
+      build_completed: ${{ steps.build.outputs.completed }}
+      test_completed: ${{ steps.test.outputs.completed }}
+      audit_completed: ${{ steps.audit.outputs.completed }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate inputs
+        id: inputs
+        shell: bash
+        env:
+          REQUESTED_DIRECTORY: ${{ inputs['working-directory'] }}
+          AUDIT_LEVEL: ${{ inputs['audit-level'] }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$REQUESTED_DIRECTORY" || "$REQUESTED_DIRECTORY" == *$'\n'* ]]; then
+            echo "working-directory must be a non-empty, single-line path" >&2
+            exit 2
+          fi
+          requested_path="$GITHUB_WORKSPACE/$REQUESTED_DIRECTORY"
+          if [[ ! -d "$requested_path" ]]; then
+            echo "working-directory does not exist: $REQUESTED_DIRECTORY" >&2
+            exit 2
+          fi
+          workspace_path="$(realpath "$GITHUB_WORKSPACE")"
+          resolved_path="$(realpath "$requested_path")"
+          case "$resolved_path/" in
+            "$workspace_path/"*) ;;
+            *)
+              echo "working-directory must resolve inside the repository" >&2
+              exit 2
+              ;;
+          esac
+          case "$AUDIT_LEVEL" in
+            low|moderate|high|critical) ;;
+            *)
+              echo "audit-level must be low, moderate, high, or critical" >&2
+              exit 2
+              ;;
+          esac
+          if [[ ! -f "$resolved_path/package.json" ]]; then
+            echo "package.json is required in working-directory" >&2
+            exit 2
+          fi
+          echo "directory=$resolved_path" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ inputs['node-version'] }}
+
+      - name: Install dependencies
+        id: install
+        shell: bash
+        working-directory: ${{ steps.inputs.outputs.directory }}
+        run: |
+          set -euo pipefail
+          if [[ -f package-lock.json || -f npm-shrinkwrap.json ]]; then
+            npm ci
+            install_mode=npm-ci
+          else
+            npm install
+            install_mode=npm-install
+          fi
+          echo "mode=$install_mode" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        id: build
+        if: ${{ inputs['run-build'] }}
+        shell: bash
+        working-directory: ${{ steps.inputs.outputs.directory }}
+        run: |
+          npm run build
+          echo "completed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        id: test
+        if: ${{ inputs['run-tests'] }}
+        shell: bash
+        working-directory: ${{ steps.inputs.outputs.directory }}
+        run: |
+          npm test
+          echo "completed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Audit production dependencies
+        id: audit
+        if: ${{ inputs['run-audit'] }}
+        shell: bash
+        working-directory: ${{ steps.inputs.outputs.directory }}
+        env:
+          AUDIT_LEVEL: ${{ inputs['audit-level'] }}
+        run: |
+          npm audit --omit=dev --audit-level "$AUDIT_LEVEL"
+          echo "completed=true" >> "$GITHUB_OUTPUT"

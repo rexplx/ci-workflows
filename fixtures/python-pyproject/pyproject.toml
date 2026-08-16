@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools==75.8.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ci-fixture-python-pyproject"
+version = "1.0.0"
+dependencies = ["pytest==8.3.5"]
+
+[tool.setuptools]
+py-modules = ["fixture_module"]

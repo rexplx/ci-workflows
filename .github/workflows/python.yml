@@ -1,0 +1,138 @@
+name: Reusable Python CI
+
+on:
+  workflow_call:
+    outputs:
+      dependency_source:
+        description: Dependency source that completed installation
+        value: ${{ jobs.python_ci.outputs.dependency_source }}
+      test_completed:
+        description: Whether the requested pytest gate completed successfully
+        value: ${{ jobs.python_ci.outputs.test_completed }}
+    inputs:
+      working-directory:
+        description: Repository-relative directory containing the Python project
+        required: false
+        type: string
+        default: .
+      python-version:
+        description: Python version passed to actions/setup-python
+        required: false
+        type: string
+        default: "3.12"
+      dependency-source:
+        description: Dependency source selection (auto, requirements, or pyproject)
+        required: false
+        type: string
+        default: auto
+      install-dependencies:
+        description: Install dependencies before tests; disable only for self-contained checks
+        required: false
+        type: boolean
+        default: true
+      run-tests:
+        description: Run pytest; disable only when the caller supplies another required test job
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  python_ci:
+    name: Python ${{ inputs['python-version'] }}
+    runs-on: ubuntu-latest
+    outputs:
+      dependency_source: ${{ steps.install.outputs.source }}
+      test_completed: ${{ steps.test.outputs.completed }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate inputs
+        id: inputs
+        shell: bash
+        env:
+          REQUESTED_DIRECTORY: ${{ inputs['working-directory'] }}
+          DEPENDENCY_SOURCE: ${{ inputs['dependency-source'] }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$REQUESTED_DIRECTORY" || "$REQUESTED_DIRECTORY" == *$'\n'* ]]; then
+            echo "working-directory must be a non-empty, single-line path" >&2
+            exit 2
+          fi
+          requested_path="$GITHUB_WORKSPACE/$REQUESTED_DIRECTORY"
+          if [[ ! -d "$requested_path" ]]; then
+            echo "working-directory does not exist: $REQUESTED_DIRECTORY" >&2
+            exit 2
+          fi
+          workspace_path="$(realpath "$GITHUB_WORKSPACE")"
+          resolved_path="$(realpath "$requested_path")"
+          case "$resolved_path/" in
+            "$workspace_path/"*) ;;
+            *)
+              echo "working-directory must resolve inside the repository" >&2
+              exit 2
+              ;;
+          esac
+          case "$DEPENDENCY_SOURCE" in
+            auto|requirements|pyproject) ;;
+            *)
+              echo "dependency-source must be auto, requirements, or pyproject" >&2
+              exit 2
+              ;;
+          esac
+          echo "directory=$resolved_path" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ inputs['python-version'] }}
+
+      - name: Install dependencies
+        id: install
+        if: ${{ inputs['install-dependencies'] }}
+        shell: bash
+        working-directory: ${{ steps.inputs.outputs.directory }}
+        env:
+          DEPENDENCY_SOURCE: ${{ inputs['dependency-source'] }}
+        run: |
+          set -euo pipefail
+          selected="$DEPENDENCY_SOURCE"
+          if [[ "$selected" == auto ]]; then
+            if [[ -f requirements.txt ]]; then
+              selected=requirements
+            elif [[ -f pyproject.toml ]]; then
+              selected=pyproject
+            else
+              echo "requirements.txt or pyproject.toml is required when dependency installation is enabled" >&2
+              exit 2
+            fi
+          fi
+          case "$selected" in
+            requirements)
+              [[ -f requirements.txt ]] || {
+                echo "dependency-source=requirements requires requirements.txt" >&2
+                exit 2
+              }
+              python -m pip install -r requirements.txt
+              ;;
+            pyproject)
+              [[ -f pyproject.toml ]] || {
+                echo "dependency-source=pyproject requires pyproject.toml" >&2
+                exit 2
+              }
+              python -m pip install .
+              ;;
+          esac
+          echo "source=$selected" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        id: test
+        if: ${{ inputs['run-tests'] }}
+        shell: bash
+        working-directory: ${{ steps.inputs.outputs.directory }}
+        run: |
+          python -m pytest
+          echo "completed=true" >> "$GITHUB_OUTPUT"
