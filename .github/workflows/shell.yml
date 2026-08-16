@@ -1,0 +1,98 @@
+name: Reusable Shell CI
+
+on:
+  workflow_call:
+    outputs:
+      checks_completed:
+        description: Whether Bash syntax and ShellCheck completed successfully
+        value: ${{ jobs.shell-ci.outputs.checks_completed }}
+    inputs:
+      working-directory:
+        description: Repository-relative directory whose tracked shell files are checked
+        required: false
+        type: string
+        default: .
+      no-shell-files:
+        description: Behavior when no tracked .sh files exist (fail or pass)
+        required: false
+        type: string
+        default: fail
+
+permissions:
+  contents: read
+
+jobs:
+  shell-ci:
+    name: Bash and ShellCheck
+    runs-on: ubuntu-latest
+    outputs:
+      checks_completed: ${{ steps.checks.outputs.completed }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate inputs
+        id: inputs
+        shell: bash
+        env:
+          REQUESTED_DIRECTORY: ${{ inputs['working-directory'] }}
+          NO_SHELL_FILES: ${{ inputs['no-shell-files'] }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$REQUESTED_DIRECTORY" || "$REQUESTED_DIRECTORY" == *$'\n'* ]]; then
+            echo "working-directory must be a non-empty, single-line path" >&2
+            exit 2
+          fi
+          requested_path="$GITHUB_WORKSPACE/$REQUESTED_DIRECTORY"
+          if [[ ! -d "$requested_path" ]]; then
+            echo "working-directory does not exist: $REQUESTED_DIRECTORY" >&2
+            exit 2
+          fi
+          workspace_path="$(realpath "$GITHUB_WORKSPACE")"
+          resolved_path="$(realpath "$requested_path")"
+          case "$resolved_path/" in
+            "$workspace_path/"*) ;;
+            *)
+              echo "working-directory must resolve inside the repository" >&2
+              exit 2
+              ;;
+          esac
+          case "$NO_SHELL_FILES" in
+            fail|pass) ;;
+            *)
+              echo "no-shell-files must be fail or pass" >&2
+              exit 2
+              ;;
+          esac
+          echo "directory=$resolved_path" >> "$GITHUB_OUTPUT"
+
+      - name: Check tracked shell files
+        id: checks
+        shell: bash
+        env:
+          WORKING_DIRECTORY: ${{ steps.inputs.outputs.directory }}
+          NO_SHELL_FILES: ${{ inputs['no-shell-files'] }}
+        run: |
+          set -euo pipefail
+          command -v shellcheck >/dev/null 2>&1 || {
+            echo "shellcheck is required on the runner" >&2
+            exit 2
+          }
+          listing_file="$(mktemp)"
+          trap 'rm -f "$listing_file"' EXIT
+          git -C "$WORKING_DIRECTORY" ls-files -z --full-name -- '*.sh' > "$listing_file"
+          mapfile -d '' -t shell_files < "$listing_file"
+          if (( ${#shell_files[@]} == 0 )); then
+            if [[ "$NO_SHELL_FILES" == pass ]]; then
+              echo "No tracked .sh files found; passing because no-shell-files=pass."
+              echo "completed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "No tracked .sh files found; set no-shell-files=pass to opt out explicitly." >&2
+            exit 2
+          fi
+          for file in "${shell_files[@]}"; do
+            bash -n "$GITHUB_WORKSPACE/$file"
+          done
+          shellcheck -- "${shell_files[@]/#/$GITHUB_WORKSPACE/}"
+          echo "completed=true" >> "$GITHUB_OUTPUT"

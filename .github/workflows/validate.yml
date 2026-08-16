@@ -1,0 +1,141 @@
+name: Reusable workflow self-test
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  action_pin_policy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Reject mutable external action references
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          invalid = []
+          for path in pathlib.Path('.github/workflows').glob('*.yml'):
+              for number, line in enumerate(path.read_text().splitlines(), 1):
+                  match = re.match(r'\s*uses:\s*(\S+)', line)
+                  if not match:
+                      continue
+                  target = match.group(1)
+                  if target.startswith('./'):
+                      continue
+                  if not re.fullmatch(r'[^@\s]+@[0-9a-f]{40}', target):
+                      invalid.append(f'{path}:{number}: {target}')
+          if invalid:
+              print('Mutable or malformed external action references:', file=sys.stderr)
+              print('\n'.join(invalid), file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
+  node_without_lockfile:
+    uses: ./.github/workflows/node.yml
+    with:
+      working-directory: fixtures/node-without-lockfile
+      run-build: true
+      run-tests: true
+      run-audit: true
+
+  node_with_lockfile:
+    uses: ./.github/workflows/node.yml
+    with:
+      working-directory: fixtures/node-with-lockfile
+      run-build: true
+      run-tests: true
+      run-audit: true
+
+  node_contract:
+    needs: [node_without_lockfile, node_with_lockfile]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert requested Node gates ran
+        shell: bash
+        env:
+          UNLOCKED_INSTALL: ${{ needs.node_without_lockfile.outputs.install_mode }}
+          LOCKED_INSTALL: ${{ needs.node_with_lockfile.outputs.install_mode }}
+          UNLOCKED_BUILD: ${{ needs.node_without_lockfile.outputs.build_completed }}
+          UNLOCKED_TEST: ${{ needs.node_without_lockfile.outputs.test_completed }}
+          UNLOCKED_AUDIT: ${{ needs.node_without_lockfile.outputs.audit_completed }}
+          LOCKED_BUILD: ${{ needs.node_with_lockfile.outputs.build_completed }}
+          LOCKED_TEST: ${{ needs.node_with_lockfile.outputs.test_completed }}
+          LOCKED_AUDIT: ${{ needs.node_with_lockfile.outputs.audit_completed }}
+        run: |
+          set -euo pipefail
+          [[ "$UNLOCKED_INSTALL" == npm-install ]]
+          [[ "$LOCKED_INSTALL" == npm-ci ]]
+          for gate in \
+            "$UNLOCKED_BUILD" "$UNLOCKED_TEST" "$UNLOCKED_AUDIT" \
+            "$LOCKED_BUILD" "$LOCKED_TEST" "$LOCKED_AUDIT"; do
+            [[ "$gate" == true ]]
+          done
+
+  python_requirements:
+    uses: ./.github/workflows/python.yml
+    with:
+      working-directory: fixtures/python-requirements
+      dependency-source: requirements
+      install-dependencies: true
+      run-tests: true
+
+  python_pyproject_auto:
+    uses: ./.github/workflows/python.yml
+    with:
+      working-directory: fixtures/python-pyproject
+      dependency-source: auto
+      install-dependencies: true
+      run-tests: true
+
+  python_contract:
+    needs: [python_requirements, python_pyproject_auto]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert Python dependency selection
+        shell: bash
+        env:
+          REQUIREMENTS_SOURCE: ${{ needs.python_requirements.outputs.dependency_source }}
+          PYPROJECT_SOURCE: ${{ needs.python_pyproject_auto.outputs.dependency_source }}
+          REQUIREMENTS_TEST: ${{ needs.python_requirements.outputs.test_completed }}
+          PYPROJECT_TEST: ${{ needs.python_pyproject_auto.outputs.test_completed }}
+        run: |
+          set -euo pipefail
+          [[ "$REQUIREMENTS_SOURCE" == requirements ]]
+          [[ "$PYPROJECT_SOURCE" == pyproject ]]
+          [[ "$REQUIREMENTS_TEST" == true ]]
+          [[ "$PYPROJECT_TEST" == true ]]
+
+  tracked_shell_files:
+    uses: ./.github/workflows/shell.yml
+    with:
+      working-directory: fixtures/shell
+      no-shell-files: fail
+
+  no_shell_files:
+    uses: ./.github/workflows/shell.yml
+    with:
+      working-directory: fixtures/no-shell-files
+      no-shell-files: pass
+
+  shell_contract:
+    needs: [tracked_shell_files, no_shell_files]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert requested Shell gates ran
+        shell: bash
+        env:
+          TRACKED_COMPLETED: ${{ needs.tracked_shell_files.outputs.checks_completed }}
+          EMPTY_COMPLETED: ${{ needs.no_shell_files.outputs.checks_completed }}
+        run: |
+          set -euo pipefail
+          [[ "$TRACKED_COMPLETED" == true ]]
+          [[ "$EMPTY_COMPLETED" == true ]]
